@@ -411,6 +411,11 @@ class Trainer:
             sample = self.data_processor.preprocess(sample)
         else:
             # load data to device if no preprocessor exists
+            list_sample = {
+                k: [elem.to(self.device) for elem in v]
+                for k, v in sample.items()
+                if isinstance(v, list) and all(torch.is_tensor(elem) for elem in v)
+            }
             sample = {
                 k: v.to(self.device)
                 for k, v in sample.items()
@@ -435,9 +440,9 @@ class Trainer:
 
         if self.mixed_precision:
             with torch.autocast(device_type=self.autocast_device_type):
-                loss += training_loss(out, **sample)
+                loss += training_loss(out, **{**list_sample, **sample})
         else:
-            loss += training_loss(out, **sample)
+            loss += training_loss(out, **{**list_sample, **sample})
 
         if self.regularizer:
             loss += self.regularizer.loss
@@ -471,6 +476,11 @@ class Trainer:
             sample = self.data_processor.preprocess(sample)
         else:
             # load data to device if no preprocessor exists
+            list_sample = {
+                k: [elem.to(self.device) for elem in v]
+                for k, v in sample.items()
+                if isinstance(v, list) and all(torch.is_tensor(elem) for elem in v)
+            }
             sample = {
                 k: v.to(self.device)
                 for k, v in sample.items()
@@ -487,7 +497,7 @@ class Trainer:
         eval_step_losses = {}
 
         for loss_name, loss in eval_losses.items():
-            val_loss = loss(out, **sample)
+            val_loss = loss(out, **{**list_sample, **sample})
             eval_step_losses[loss_name] = val_loss
         
         if return_output:
