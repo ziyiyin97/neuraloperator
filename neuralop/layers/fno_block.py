@@ -118,6 +118,7 @@ class FNOBlocks(nn.Module):
         fixed_rank_modes=False, #undoc
         implementation="factorized", #undoc
         decomposition_kwargs=dict(),
+        post_fno_conv=False,
         **kwargs,
     ):
         super().__init__()
@@ -150,6 +151,7 @@ class FNOBlocks(nn.Module):
         self.separable = separable
         self.preactivation = preactivation
         self.ada_in_features = ada_in_features
+        self.post_fno_conv = post_fno_conv
 
         # apply real nonlin if data is real, otherwise CGELU
         if self.complex_data:
@@ -174,6 +176,10 @@ class FNOBlocks(nn.Module):
                 complex_data=complex_data
             ) 
             for i in range(n_layers)])
+
+        self.extra_convs = nn.ModuleList([
+                nn.Conv2d(self.in_channels, self.out_channels, kernel_size=3, padding=1)
+            for _ in range(n_layers)]) if post_fno_conv else None
 
         self.fno_skips = nn.ModuleList(
             [
@@ -297,6 +303,8 @@ class FNOBlocks(nn.Module):
 
         x = x_fno + x_skip_fno
 
+        x = self.extra_convs[index](x) if self.post_fno_conv else x
+
         if (index < (self.n_layers - 1)):
             x = self.non_linearity(x)
 
@@ -333,6 +341,8 @@ class FNOBlocks(nn.Module):
         x_fno = self.convs[index](x, output_shape=output_shape)
 
         x = x_fno + x_skip_fno
+
+        x = self.extra_convs[index](x) if self.post_fno_conv else x
 
         if index < (self.n_layers - 1):
             x = self.non_linearity(x)

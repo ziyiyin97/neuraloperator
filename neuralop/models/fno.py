@@ -190,6 +190,7 @@ class FNO(BaseModel, name='FNO'):
         separable: bool=False,
         preactivation: bool=False,
         conv_module: nn.Module=SpectralConv,
+        post_fno_conv: bool=False,
         **kwargs
     ):
         
@@ -204,6 +205,7 @@ class FNO(BaseModel, name='FNO'):
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.n_layers = n_layers
+        self.post_fno_conv = post_fno_conv
 
         # init lifting and projection channels using ratios w.r.t hidden channels
         self.lifting_channel_ratio = lifting_channel_ratio
@@ -287,6 +289,7 @@ class FNO(BaseModel, name='FNO'):
             decomposition_kwargs=decomposition_kwargs,
             conv_module=conv_module,
             n_layers=n_layers,
+            post_fno_conv=post_fno_conv,
             **kwargs
         )
         
