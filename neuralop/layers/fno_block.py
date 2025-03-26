@@ -161,8 +161,8 @@ class FNOBlocks(nn.Module):
         
         self.convs = nn.ModuleList([
                 conv_module(
-                self.in_channels,
-                self.out_channels,
+                self.in_channels if type(self.in_channels) == int else self.in_channels[i],
+                self.out_channels if type(self.in_channels) == int else self.in_channels[i+1],
                 self.n_modes,
                 resolution_scaling_factor=None if resolution_scaling_factor is None else self.resolution_scaling_factor[i],
                 max_n_modes=max_n_modes,
@@ -178,18 +178,21 @@ class FNOBlocks(nn.Module):
             for i in range(n_layers)])
 
         self.extra_convs = nn.ModuleList([
-                nn.Conv2d(self.in_channels, self.out_channels, kernel_size=3, padding=1)
-            for _ in range(n_layers)]) if post_fno_conv else None
+                nn.Conv2d(self.in_channels if type(self.in_channels) == int else self.in_channels[i],
+                          self.out_channels if type(self.in_channels) == int else self.in_channels[i+1],
+                          kernel_size=3,
+                          padding=1)
+            for i in range(n_layers)]) if post_fno_conv else None
 
         self.fno_skips = nn.ModuleList(
             [
                 skip_connection(
-                    self.in_channels,
-                    self.out_channels,
+                    self.in_channels if type(self.in_channels) == int else self.in_channels[i],
+                    self.out_channels if type(self.in_channels) == int else self.in_channels[i+1],
                     skip_type=fno_skip,
                     n_dim=self.n_dim,
                 )
-                for _ in range(n_layers)
+                for i in range(n_layers)
             ]
         )
         if self.complex_data:
@@ -200,12 +203,12 @@ class FNOBlocks(nn.Module):
         self.channel_mlp = nn.ModuleList(
             [
                 ChannelMLP(
-                    in_channels=self.out_channels,
-                    hidden_channels=round(self.out_channels * channel_mlp_expansion),
+                    in_channels=self.out_channels if type(self.in_channels) == int else self.in_channels[i],
+                    hidden_channels=round(self.out_channels * channel_mlp_expansion) if type(self.in_channels) == int else round(self.in_channels[i] * channel_mlp_expansion),
                     dropout=channel_mlp_dropout,
                     n_dim=self.n_dim,
                 )
-                for _ in range(n_layers)
+                for i in range(n_layers)
             ]
         )
         if self.complex_data:
@@ -215,12 +218,12 @@ class FNOBlocks(nn.Module):
         self.channel_mlp_skips = nn.ModuleList(
             [
                 skip_connection(
-                    self.in_channels,
-                    self.out_channels,
+                    self.in_channels if type(self.in_channels) == int else self.in_channels[i],
+                    self.out_channels if type(self.in_channels) == int else self.in_channels[i],
                     skip_type=channel_mlp_skip,
                     n_dim=self.n_dim,
                 )
-                for _ in range(n_layers)
+                for i in range(n_layers)
             ]
         )
         if self.complex_data:
