@@ -153,7 +153,7 @@ class FNOBlocks(nn.Module):
         self.preactivation = preactivation
         self.ada_in_features = ada_in_features
         self.post_fno_conv = post_fno_conv
-        self.bottleneck_channel = bottleneck_channel
+        self.bottleneck_channel = [bottleneck_channel] if type(bottleneck_channel) == int else bottleneck_channel
 
         # apply real nonlin if data is real, otherwise CGELU
         if self.complex_data:
@@ -183,9 +183,11 @@ class FNOBlocks(nn.Module):
                 nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1, padding=1)
             for _ in range(n_layers)]) if self.post_fno_conv else None
         
-        self.bottleneck_convs = nn.ModuleList(
-            [nn.Conv2d(self.in_channels, self.bottleneck_channel, kernel_size=1, padding=1),
-             nn.Conv2d(self.bottleneck_channel, self.out_channels, kernel_size=1, padding=1)]) if self.bottleneck_channel else None
+        if self.bottleneck_channel:
+            self.bottleneck_convs = nn.ModuleList(
+                [nn.Conv2d(self.in_channels, self.bottleneck_channel[0], kernel_size=1, padding=1),
+                *[nn.Conv2d(self.bottleneck_channel[i], self.bottleneck_channel[i+1], kernel_size=1, padding=1) for i in range(len(self.bottleneck_channel)-1)],
+                nn.Conv2d(self.bottleneck_channel[-1], self.out_channels, kernel_size=1, padding=1)])
 
         self.fno_skips = nn.ModuleList(
             [
@@ -331,7 +333,8 @@ class FNOBlocks(nn.Module):
             x = self.non_linearity(x)
 
         if self.bottleneck_channel and index == self.n_layers // 2:
-            x = self.bottleneck_convs[1](self.bottleneck_convs[0](x))
+            for conv in self.bottleneck_convs:
+                x = conv(x)
 
         return x
 
@@ -370,7 +373,8 @@ class FNOBlocks(nn.Module):
         x = self.channel_mlp[index](x) + x_skip_channel_mlp
 
         if self.bottleneck_channel and index == self.n_layers // 2:
-            x = self.bottleneck_convs[1](self.bottleneck_convs[0](x))
+            for conv in self.bottleneck_convs:
+                x = conv(x)
             
         return x
 

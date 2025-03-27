@@ -191,7 +191,7 @@ class FNO(BaseModel, name='FNO'):
         preactivation: bool=False,
         conv_module: nn.Module=SpectralConv,
         post_fno_conv: bool=False,
-        bottleneck_channel=None,
+        bottleneck_channel: Union[int, List[int]]=None,
         **kwargs
     ):
         
