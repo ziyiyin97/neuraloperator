@@ -191,6 +191,7 @@ class FNO(BaseModel, name='FNO'):
         preactivation: bool=False,
         conv_module: nn.Module=SpectralConv,
         post_fno_conv: bool=False,
+        bottleneck_channel=None,
         **kwargs
     ):
         
@@ -206,6 +207,7 @@ class FNO(BaseModel, name='FNO'):
         self.out_channels = out_channels
         self.n_layers = n_layers
         self.post_fno_conv = post_fno_conv
+        self.bottleneck_channel = bottleneck_channel
 
         # init lifting and projection channels using ratios w.r.t hidden channels
         self.lifting_channel_ratio = lifting_channel_ratio
@@ -290,6 +292,7 @@ class FNO(BaseModel, name='FNO'):
             conv_module=conv_module,
             n_layers=n_layers,
             post_fno_conv=post_fno_conv,
+            bottleneck_channel=bottleneck_channel,
             **kwargs
         )
         

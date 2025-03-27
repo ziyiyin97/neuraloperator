@@ -114,6 +114,7 @@ class FNOBlocks(nn.Module):
         separable=False,
         factorization=None,
         rank=1.0,
+        bottleneck_channel=None,
         conv_module=SpectralConv,
         fixed_rank_modes=False, #undoc
         implementation="factorized", #undoc
@@ -152,6 +153,7 @@ class FNOBlocks(nn.Module):
         self.preactivation = preactivation
         self.ada_in_features = ada_in_features
         self.post_fno_conv = post_fno_conv
+        self.bottleneck_channel = bottleneck_channel
 
         # apply real nonlin if data is real, otherwise CGELU
         if self.complex_data:
@@ -178,11 +180,12 @@ class FNOBlocks(nn.Module):
             for i in range(n_layers)])
 
         self.extra_convs = nn.ModuleList([
-                nn.Conv2d(self.in_channels if type(self.in_channels) == int else self.in_channels[i],
-                          self.out_channels if type(self.in_channels) == int else self.in_channels[i+1],
-                          kernel_size=3,
-                          padding=1)
-            for i in range(n_layers)]) if post_fno_conv else None
+                nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1, padding=1)
+            for _ in range(n_layers)]) if self.post_fno_conv else None
+        
+        self.bottleneck_convs = nn.ModuleList(
+            [nn.Conv2d(self.in_channels, self.bottleneck_channel, kernel_size=1, padding=1),
+             nn.Conv2d(self.bottleneck_channel, self.out_channels, kernel_size=1, padding=1)]) if self.bottleneck_channel else None
 
         self.fno_skips = nn.ModuleList(
             [
@@ -327,6 +330,9 @@ class FNOBlocks(nn.Module):
         if index < (self.n_layers - 1):
             x = self.non_linearity(x)
 
+        if self.bottleneck_channel and index == self.n_layers // 2:
+            x = self.bottleneck_convs[1](self.bottleneck_convs[0](x))
+
         return x
 
     def forward_with_preactivation(self, x, index=0, output_shape=None):
@@ -363,6 +369,9 @@ class FNOBlocks(nn.Module):
 
         x = self.channel_mlp[index](x) + x_skip_channel_mlp
 
+        if self.bottleneck_channel and index == self.n_layers // 2:
+            x = self.bottleneck_convs[1](self.bottleneck_convs[0](x))
+            
         return x
 
     @property
