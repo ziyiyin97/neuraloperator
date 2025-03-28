@@ -211,10 +211,10 @@ class FNO(BaseModel, name='FNO'):
 
         # init lifting and projection channels using ratios w.r.t hidden channels
         self.lifting_channel_ratio = lifting_channel_ratio
-        self.lifting_channels = lifting_channel_ratio * self.hidden_channels[0]
+        self.lifting_channels = lifting_channel_ratio * self.hidden_channels
 
         self.projection_channel_ratio = projection_channel_ratio
-        self.projection_channels = projection_channel_ratio * self.hidden_channels[0]
+        self.projection_channels = projection_channel_ratio * self.hidden_channels
 
         self.non_linearity = non_linearity
         self.rank = rank
@@ -305,7 +305,7 @@ class FNO(BaseModel, name='FNO'):
         if self.lifting_channels:
             self.lifting = ChannelMLP(
                 in_channels=lifting_in_channels,
-                out_channels=self.hidden_channels[0],
+                out_channels=self.hidden_channels,
                 hidden_channels=self.lifting_channels,
                 n_layers=2,
                 n_dim=self.n_dim,
@@ -326,7 +326,7 @@ class FNO(BaseModel, name='FNO'):
             self.lifting = ComplexValued(self.lifting)
 
         self.projection = ChannelMLP(
-            in_channels=self.hidden_channels[0],
+            in_channels=self.hidden_channels,
             out_channels=out_channels,
             hidden_channels=self.projection_channels,
             n_layers=2,
