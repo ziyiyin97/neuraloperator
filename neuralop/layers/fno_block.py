@@ -115,6 +115,7 @@ class FNOBlocks(nn.Module):
         factorization=None,
         rank=1.0,
         bottleneck_channel=None,
+        bottleneck_freq=None,
         conv_module=SpectralConv,
         fixed_rank_modes=False, #undoc
         implementation="factorized", #undoc
@@ -154,6 +155,12 @@ class FNOBlocks(nn.Module):
         self.ada_in_features = ada_in_features
         self.post_fno_conv = post_fno_conv
         self.bottleneck_channel = [bottleneck_channel] if type(bottleneck_channel) == int else bottleneck_channel
+        if self.bottleneck_channel is not None:
+            self.bottleneck_freq = bottleneck_freq if bottleneck_freq is not None else 1
+            self.bottleneck_layer_idx = [(i * self.n_layers) // (self.bottleneck_freq + 1) - 1 for i in range(1, self.bottleneck_freq+1)]
+        else:
+            self.bottleneck_freq = None
+            self.bottleneck_layer_idx = None
 
         # apply real nonlin if data is real, otherwise CGELU
         if self.complex_data:
@@ -184,10 +191,10 @@ class FNOBlocks(nn.Module):
             for _ in range(n_layers)]) if self.post_fno_conv else None
         
         if self.bottleneck_channel:
-            self.bottleneck_convs = nn.ModuleList(
+            self.bottleneck_convs = [nn.ModuleList(
                 [nn.Conv2d(self.in_channels, self.bottleneck_channel[0], kernel_size=1, padding=1),
                 *[nn.Conv2d(self.bottleneck_channel[i], self.bottleneck_channel[i+1], kernel_size=1, padding=1) for i in range(len(self.bottleneck_channel)-1)],
-                nn.Conv2d(self.bottleneck_channel[-1], self.out_channels, kernel_size=1, padding=1)])
+                nn.Conv2d(self.bottleneck_channel[-1], self.out_channels, kernel_size=1, padding=1)]) for _ in range(bottleneck_freq)]
 
         self.fno_skips = nn.ModuleList(
             [
@@ -332,8 +339,8 @@ class FNOBlocks(nn.Module):
         if index < (self.n_layers - 1):
             x = self.non_linearity(x)
 
-        if self.bottleneck_channel and index == self.n_layers // 2:
-            for conv in self.bottleneck_convs:
+        if self.bottleneck_channel and index in self.bottleneck_layer_idx:
+            for conv in self.bottleneck_convs[self.bottleneck_layer_idx.index(index)]:
                 x = conv(x)
 
         return x
@@ -372,8 +379,8 @@ class FNOBlocks(nn.Module):
 
         x = self.channel_mlp[index](x) + x_skip_channel_mlp
 
-        if self.bottleneck_channel and index == self.n_layers // 2:
-            for conv in self.bottleneck_convs:
+        if self.bottleneck_channel and index in self.bottleneck_layer_idx:
+            for conv in self.bottleneck_convs[self.bottleneck_layer_idx.index(index)]:
                 x = conv(x)
             
         return x
