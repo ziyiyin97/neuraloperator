@@ -317,7 +317,7 @@ class Trainer:
                       eval_metrics=all_metrics)
         return all_metrics
     
-    def evaluate(self, loss_dict, data_loader, log_prefix="", epoch=None):
+    def evaluate(self, loss_dict, data_loader, log_prefix="", epoch=None, return_output=False):
         """Evaluates the model on a dictionary of losses
 
         Parameters
@@ -331,6 +331,8 @@ class Trainer:
         epoch : int | None
             current epoch. Used when logging both train and eval
             default None
+        return_output: bool | False
+            return the output of the network
         Returns
         -------
         errors : dict
@@ -357,13 +359,12 @@ class Trainer:
                                 "expects losses to sum across the batch dim.")
 
         self.n_samples = 0
+        outputs = []
         with torch.no_grad():
             for idx, sample in enumerate(data_loader):
-                return_output = False
-                if idx == len(data_loader) - 1:
-                    return_output = True
-                eval_step_losses, outs = self.eval_one_batch(sample, loss_dict, return_output=return_output)
-
+                eval_step_losses, outs = self.eval_one_batch(sample, loss_dict, return_output=True if idx == len(data_loader) - 1 else return_output)
+                if outs is not None:
+                    outputs.extend(outs)
                 for loss_name, val_loss in eval_step_losses.items():
                     errors[f"{log_prefix}_{loss_name}"] += val_loss
             
@@ -374,7 +375,10 @@ class Trainer:
         if self.log_output:
             errors[f"{log_prefix}_outputs"] = wandb.Image(outs)
         
-        return errors
+        if return_output:
+            return errors, outputs
+        else:
+            return errors
     
     def on_epoch_start(self, epoch):
         """on_epoch_start runs at the beginning
@@ -483,9 +487,9 @@ class Trainer:
         else:
             # load data to device if no preprocessor exists
             list_sample = {
-                k: [elem.to(self.device) for elem in v]
+                k: [elem for elem in v]
                 for k, v in sample.items()
-                if isinstance(v, list) and all(torch.is_tensor(elem) for elem in v)
+                if isinstance(v, list)
             }
             sample = {
                 k: v.to(self.device)
