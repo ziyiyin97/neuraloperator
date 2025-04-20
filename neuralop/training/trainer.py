@@ -432,6 +432,9 @@ class Trainer:
                 if torch.is_tensor(v)
             }
 
+        if not hasattr(self, 'n_samples'):
+            self.n_samples = 0
+
         self.n_samples += sample["y"].shape[0]
 
         if self.mixed_precision:
@@ -496,6 +499,8 @@ class Trainer:
                 for k, v in sample.items()
                 if torch.is_tensor(v)
             }
+        if not hasattr(self, 'n_samples'):
+            self.n_samples = 0
 
         self.n_samples += sample["y"].size(0)
 
