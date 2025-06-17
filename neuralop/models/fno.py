@@ -14,6 +14,7 @@ from ..layers.fno_block import FNOBlocks
 from ..layers.channel_mlp import ChannelMLP
 from ..layers.complex import ComplexValued
 from .base_model import BaseModel
+from torch.utils.checkpoint import checkpoint
 
 class FNO(BaseModel, name='FNO'):
     """N-Dimensional Fourier Neural Operator. The FNO learns a mapping between
@@ -193,6 +194,7 @@ class FNO(BaseModel, name='FNO'):
         post_fno_conv: bool=False,
         bottleneck_channel: Union[int, List[int]]=None,
         bottleneck_freq: int=None,
+        use_checkpointing: bool=False,
         **kwargs
     ):
         
@@ -298,7 +300,8 @@ class FNO(BaseModel, name='FNO'):
             bottleneck_freq=bottleneck_freq,
             **kwargs
         )
-        
+
+        self.use_checkpointing = use_checkpointing
         # if adding a positional embedding, add those channels to lifting
         lifting_in_channels = self.in_channels
         if self.positional_embedding is not None:
@@ -384,7 +387,10 @@ class FNO(BaseModel, name='FNO'):
             x = self.domain_padding.pad(x)
 
         for layer_idx in range(self.n_layers):
-            x = self.fno_blocks(x, layer_idx, output_shape=output_shape[layer_idx])
+            if self.use_checkpointing:
+                x = checkpoint(self.fno_blocks, x, layer_idx)
+            else:
+                x = self.fno_blocks(x, layer_idx, output_shape=output_shape[layer_idx])
 
         if self.domain_padding is not None:
             x = self.domain_padding.unpad(x)
