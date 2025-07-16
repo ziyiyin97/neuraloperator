@@ -4,6 +4,7 @@ from typing import Tuple, List, Union, Literal
 Number = Union[float, int]
 
 import torch
+import ptwt
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -195,6 +196,7 @@ class FNO(BaseModel, name='FNO'):
         bottleneck_channel: Union[int, List[int]]=None,
         bottleneck_freq: int=None,
         use_checkpointing: bool=False,
+        wavelet_encoding: bool=False,
         **kwargs
     ):
         
@@ -232,6 +234,10 @@ class FNO(BaseModel, name='FNO'):
         self.preactivation = preactivation
         self.complex_data = complex_data
         self.fno_block_precision = fno_block_precision
+        self.wavelet_encoding = wavelet_encoding
+        if self.wavelet_encoding:
+            self.in_channels = self.in_channels * 4**self.n_dim
+            self.out_channels = self.out_channels * 4**self.n_dim
         
         if positional_embedding == "grid":
             spatial_grid_boundaries = [[0., 1.]] * self.n_dim
@@ -333,7 +339,7 @@ class FNO(BaseModel, name='FNO'):
 
         self.projection = ChannelMLP(
             in_channels=self.hidden_channels,
-            out_channels=out_channels,
+            out_channels=self.out_channels,
             hidden_channels=self.projection_channels,
             n_layers=2,
             n_dim=self.n_dim,
@@ -372,6 +378,65 @@ class FNO(BaseModel, name='FNO'):
             * If tuple list, specifies the exact output-shape of each FNO Block
         """
 
+        if self.wavelet_encoding:
+            # Store original input shape for final output matching
+            self._original_input_shape = x.shape
+            
+            x_tuple = ptwt.wavedec3(x, wavelet='db1', level=2)
+            # x_tuple[0]: approx coeffs, x_tuple[1]: dict of detail coeffs at level 2, x_tuple[2]: dict of detail coeffs at level 1
+            
+            # Store original shapes and padding info for reconstruction
+            self._original_level1_shapes = {}
+            self._level1_padding = {}
+            
+            # Flatten all arrays in the tuple (including dict values) and concatenate along channel dim=1
+            x_list = [x_tuple[0]]
+            
+            # Add level 2 detail coefficients (already correct size)
+            level2_keys = list(x_tuple[1].keys())
+            x_list.extend([x_tuple[1][key] for key in level2_keys])
+            
+            # Split level 1 detail coefficients into 8 blocks to match spatial dimensions
+            level1_keys = list(x_tuple[2].keys())
+            for key in level1_keys:
+                coeff = x_tuple[2][key]
+                # coeff has shape (B, C, NX/2, NY/2, NZ/2)
+                # We want to split it into 8 blocks of shape (B, C, NX/4, NY/4, NZ/4)
+                B, C, H, W, D = coeff.shape
+                
+                # Store original shape for reconstruction
+                self._original_level1_shapes[key] = (H, W, D)
+                
+                # Pad dimensions if they are odd to make them even
+                pad_h = H % 2
+                pad_w = W % 2
+                pad_d = D % 2
+                
+                # Store padding info for reconstruction
+                self._level1_padding[key] = (pad_h, pad_w, pad_d)
+                
+                if pad_h or pad_w or pad_d:
+                    # Pad the tensor if any dimension is odd
+                    padding = (0, pad_d, 0, pad_w, 0, pad_h)  # (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back)
+                    coeff = F.pad(coeff, padding, mode='constant', value=0)
+                    H, W, D = H + pad_h, W + pad_w, D + pad_d
+                
+                # Reshape to (B, C, 2, H//2, 2, W//2, 2, D//2) and rearrange to separate blocks
+                coeff_reshaped = coeff.view(B, C, 2, H//2, 2, W//2, 2, D//2)
+                coeff_reshaped = coeff_reshaped.permute(0, 1, 2, 4, 6, 3, 5, 7)  # (B, C, 2, 2, 2, H//2, W//2, D//2)
+                
+                # Split into 8 separate tensors
+                for i in range(2):
+                    for j in range(2):
+                        for k in range(2):
+                            x_list.append(coeff_reshaped[:, :, i, j, k, :, :, :])
+            
+            # Store the coefficient structure for reconstruction
+            self._level2_keys = level2_keys
+            self._level1_keys = level1_keys
+            
+            x = torch.cat(x_list, dim=1)
+
         if output_shape is None:
             output_shape = [None]*self.n_layers
         elif isinstance(output_shape, tuple):
@@ -396,6 +461,80 @@ class FNO(BaseModel, name='FNO'):
             x = self.domain_padding.unpad(x)
 
         x = self.projection(x)
+
+        if self.wavelet_encoding:
+            # Reorganize x back into wavelet coefficient format
+            B, total_channels = x.shape[:2]
+            spatial_dims = x.shape[2:]
+            
+            # Calculate original number of channels before wavelet expansion
+            original_out_channels = total_channels // (4**self.n_dim)
+            coeffs_per_channel = 4**self.n_dim  # 64 for 3D
+            
+            # Split channels back into coefficient groups
+            x_reshaped = x.view(B, original_out_channels, coeffs_per_channel, *spatial_dims)
+            
+            reconstructed_outputs = []
+            for c in range(original_out_channels):
+                # Extract coefficients for this channel
+                channel_coeffs = x_reshaped[:, c, :, ...]  # (B, 64, H, W, D) for 3D
+                
+                # Split into approximation (1), level 2 details (7), and level 1 details (56)
+                approx_coeff = channel_coeffs[:, 0, ...]  # (B, H, W, D)
+                
+                # Reconstruct level 2 detail coefficient dictionary using stored keys
+                num_level2 = len(self._level2_keys)
+                level2_coeffs = channel_coeffs[:, 1:1+num_level2, ...]  # (B, 7, H, W, D) 
+                level2_dict = {key: level2_coeffs[:, i, ...] for i, key in enumerate(self._level2_keys)}
+                
+                # Reconstruct level 1 detail coefficients by recombining 8 blocks per coefficient
+                level1_coeffs = channel_coeffs[:, 1+num_level2:, ...]   # (B, 56, H, W, D)
+                level1_dict = {}
+                
+                for i, key in enumerate(self._level1_keys):
+                    # Extract 8 blocks for this coefficient (each block has shape (B, H, W, D))
+                    blocks = level1_coeffs[:, i*8:(i+1)*8, ...]  # (B, 8, H, W, D)
+                    blocks = blocks.view(B, 2, 2, 2, *spatial_dims)  # (B, 2, 2, 2, H, W, D)
+                    
+                    # Recombine blocks back to original coefficient shape
+                    # Permute to (B, 2, H, 2, W, 2, D) then reshape to (B, 2*H, 2*W, 2*D)
+                    blocks = blocks.permute(0, 1, 4, 2, 5, 3, 6)  # (B, 2, H, 2, W, 2, D)
+                    recombined = blocks.contiguous().view(B, 2*spatial_dims[0], 2*spatial_dims[1], 2*spatial_dims[2])
+                    
+                    # Remove padding that was added during forward pass
+                    orig_h, orig_w, orig_d = self._original_level1_shapes[key]
+                    pad_h, pad_w, pad_d = self._level1_padding[key]
+                    
+                    if pad_h or pad_w or pad_d:
+                        # Remove the padding by slicing to original dimensions
+                        recombined = recombined[:, :orig_h, :orig_w, :orig_d]
+                    
+                    level1_dict[key] = recombined
+                
+                # Reconstruct the wavelet coefficient tuple
+                coeffs_tuple = (approx_coeff, level2_dict, level1_dict)
+                
+                # Apply inverse wavelet transform
+                reconstructed = ptwt.waverec3(coeffs_tuple, wavelet='db1')
+                reconstructed_outputs.append(reconstructed)
+            
+            # Stack all channels back together
+            x = torch.stack(reconstructed_outputs, dim=1)
+            
+            # Ensure output matches original input shape (handle any size mismatches from wavelet reconstruction)
+            original_shape = self._original_input_shape
+            if x.shape != original_shape:
+                # Crop or pad to match original shape
+                if x.shape[2:] != original_shape[2:]:  # Check spatial dimensions
+                    # Crop to original spatial dimensions
+                    slices = [slice(None), slice(None)]  # Keep batch and channel dims
+                    for i, (curr_size, orig_size) in enumerate(zip(x.shape[2:], original_shape[2:])):
+                        if curr_size >= orig_size:
+                            slices.append(slice(0, orig_size))
+                        else:
+                            # This shouldn't happen, but handle it just in case
+                            slices.append(slice(None))
+                    x = x[tuple(slices)]
 
         return x
 
