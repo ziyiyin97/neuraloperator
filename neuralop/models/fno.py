@@ -452,7 +452,7 @@ class FNO(BaseModel, name='FNO'):
             x = self.domain_padding.pad(x)
 
         for layer_idx in range(self.n_layers):
-            if self.use_checkpointing:
+            if self.use_checkpointing and x.requires_grad:
                 x = checkpoint(self.fno_blocks, x, layer_idx)
             else:
                 x = self.fno_blocks(x, layer_idx, output_shape=output_shape[layer_idx])
