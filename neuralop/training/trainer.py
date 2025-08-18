@@ -1,6 +1,6 @@
 from timeit import default_timer
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional, Dict, Any
 import sys
 import warnings
 
@@ -9,6 +9,8 @@ from torch.cuda import amp
 from torch import nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.cuda.amp import autocast, GradScaler
+from collections import defaultdict
 # Only import wandb and use if installed
 wandb_available = False
 try:
@@ -59,6 +61,11 @@ class Trainer:
         wandb_log: bool=False,
         device: str='cpu',
         mixed_precision: bool=False,
+        grad_scaler_init_scale: float=2.**16,
+        grad_scaler_growth_factor: float=2.0,
+        grad_scaler_backoff_factor: float=0.5,
+        grad_scaler_growth_interval: int=2000,
+        grad_scaler_enabled: Optional[bool]=None,
         data_processor: nn.Module=None,
         eval_interval: int=1,
         log_output: bool=False,
@@ -66,6 +73,20 @@ class Trainer:
         verbose: bool=False,
     ):
         """
+        Enhanced trainer with comprehensive mixed precision support
+        
+        Parameters
+        ----------
+        grad_scaler_init_scale : float, default 2**16
+            Initial scale factor for GradScaler
+        grad_scaler_growth_factor : float, default 2.0
+            Factor to multiply scale by when gradients are finite
+        grad_scaler_backoff_factor : float, default 0.5
+            Factor to multiply scale by when gradients are infinite
+        grad_scaler_growth_interval : int, default 2000
+            Number of consecutive unskipped steps before growing scale
+        grad_scaler_enabled : bool, optional
+            Whether to enable GradScaler. If None, follows mixed_precision setting
         """
 
         self.model = model
@@ -79,6 +100,7 @@ class Trainer:
         self.verbose = verbose
         self.use_distributed = use_distributed
         self.device = device
+        
         # handle autocast device
         if isinstance(self.device, torch.device):
             self.autocast_device_type = self.device.type
@@ -87,11 +109,57 @@ class Trainer:
                 self.autocast_device_type = "cuda"
             else:
                 self.autocast_device_type = "cpu"
+        
         self.mixed_precision = mixed_precision
+        
+        # Initialize GradScaler for mixed precision training
+        self.grad_scaler_enabled = grad_scaler_enabled if grad_scaler_enabled is not None else mixed_precision
+        if self.grad_scaler_enabled and self.autocast_device_type == "cuda":
+            self.grad_scaler = GradScaler(
+                init_scale=grad_scaler_init_scale,
+                growth_factor=grad_scaler_growth_factor,
+                backoff_factor=grad_scaler_backoff_factor,
+                growth_interval=grad_scaler_growth_interval,
+                enabled=True
+            )
+            if self.verbose:
+                print(f"Initialized GradScaler with init_scale={grad_scaler_init_scale}")
+        else:
+            self.grad_scaler = GradScaler(enabled=False)
+            
+        # Mixed precision monitoring
+        self.mp_stats = {
+            'scale_updates': 0,
+            'inf_grad_skips': 0,
+            'successful_steps': 0,
+            'current_scale': grad_scaler_init_scale if self.grad_scaler_enabled else 1.0
+        }
+        
         self.data_processor = data_processor
+        
+        # Initialize regularizer to None (will be set in train method if provided)
+        self.regularizer = None
+        
+        # Initialize epoch tracking for train_one_batch compatibility
+        self.epoch = 0
     
         # Track starting epoch for checkpointing/resuming
         self.start_epoch = 0
+        
+        # Check for complex parameters (complex numbers don't work with GradScaler)
+        self._has_complex_params = None
+
+    def _check_complex_parameters(self):
+        """Check if model has complex parameters that are incompatible with GradScaler"""
+        if self._has_complex_params is None:
+            self._has_complex_params = False
+            for param in self.model.parameters():
+                if param.dtype.is_complex:
+                    self._has_complex_params = True
+                    if self.verbose:
+                        print("⚠️  Complex parameters detected - disabling gradient scaling for compatibility")
+                    break
+        return self._has_complex_params
 
     def train(
         self,
@@ -397,8 +465,8 @@ class Trainer:
         self.epoch = epoch
         return None
 
-    def train_one_batch(self, idx, sample, training_loss):
-        """Run one batch of input through model
+    def train_one_batch(self, idx, sample, training_loss, grad_clip_max_norm=None):
+        """Run one batch of input through model with enhanced mixed precision support
            and return training loss on outputs
 
         Parameters
@@ -407,6 +475,10 @@ class Trainer:
             index of batch within train_loader
         sample : dict
             data dictionary holding one batch
+        training_loss : callable
+            loss function to use
+        grad_clip_max_norm : float, optional
+            maximum norm for gradient clipping
 
         Returns
         -------
@@ -437,6 +509,7 @@ class Trainer:
 
         self.n_samples += sample["y"].shape[0]
 
+        # Forward pass with mixed precision
         if self.mixed_precision:
             with torch.autocast(device_type=self.autocast_device_type):
                 out = self.model(**sample)
@@ -449,18 +522,113 @@ class Trainer:
         if self.data_processor is not None:
             out, sample = self.data_processor.postprocess(out, sample)
 
-        loss = 0.0
-
+        # Loss calculation with mixed precision
         if self.mixed_precision:
             with torch.autocast(device_type=self.autocast_device_type):
-                loss += training_loss(out, **{**list_sample, **sample})
+                loss = training_loss(out, **{**list_sample, **sample})
+                if self.regularizer:
+                    loss += self.regularizer.loss
         else:
-            loss += training_loss(out, **{**list_sample, **sample})
+            loss = training_loss(out, **{**list_sample, **sample})
+            if self.regularizer:
+                loss += self.regularizer.loss
 
-        if self.regularizer:
-            loss += self.regularizer.loss
+        # Backward pass with gradient scaling
+        # Check if we can use gradient scaling (complex parameters aren't supported)
+        use_grad_scaling = self.grad_scaler_enabled and not self._check_complex_parameters()
+        
+        if use_grad_scaling:
+            # Scale loss to prevent gradient underflow
+            scaled_loss = self.grad_scaler.scale(loss)
+            scaled_loss.backward()
+            
+            # Update mixed precision statistics
+            self.mp_stats['current_scale'] = self.grad_scaler.get_scale()
+            
+            # Gradient clipping (unscale gradients first)
+            if grad_clip_max_norm is not None:
+                self.grad_scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip_max_norm)
+            
+            # Check for inf/nan gradients and update
+            scale_before = self.grad_scaler.get_scale()
+            self.grad_scaler.step(self.optimizer)
+            self.grad_scaler.update()
+            scale_after = self.grad_scaler.get_scale()
+            
+            # Update statistics
+            if scale_after < scale_before:
+                self.mp_stats['inf_grad_skips'] += 1
+            elif scale_after > scale_before:
+                self.mp_stats['scale_updates'] += 1
+            else:
+                self.mp_stats['successful_steps'] += 1
+                
+        else:
+            # Standard backward pass
+            loss.backward()
+            if grad_clip_max_norm is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip_max_norm)
+            self.optimizer.step()
+            self.mp_stats['successful_steps'] += 1
         
         return loss
+    
+    def get_mixed_precision_stats(self, reset=False):
+        """Get mixed precision training statistics
+        
+        Parameters
+        ----------
+        reset : bool, default False
+            Whether to reset statistics after retrieving them
+            
+        Returns
+        -------
+        dict
+            Dictionary containing mixed precision statistics
+        """
+        stats = self.mp_stats.copy()
+        
+        # Calculate additional useful metrics
+        total_steps = stats['successful_steps'] + stats['inf_grad_skips']
+        if total_steps > 0:
+            stats['success_rate'] = stats['successful_steps'] / total_steps
+            stats['skip_rate'] = stats['inf_grad_skips'] / total_steps
+        else:
+            stats['success_rate'] = 1.0
+            stats['skip_rate'] = 0.0
+            
+        if reset:
+            self.mp_stats = {
+                'scale_updates': 0,
+                'inf_grad_skips': 0,
+                'successful_steps': 0,
+                'current_scale': self.mp_stats['current_scale']
+            }
+            
+        return stats
+
+    def log_mixed_precision_stats(self, step=None, prefix="mp"):
+        """Log mixed precision statistics to wandb if available
+        
+        Parameters
+        ----------
+        step : int, optional
+            Training step for logging
+        prefix : str, default "mp"
+            Prefix for metric names
+        """
+        if self.wandb_log and self.grad_scaler_enabled:
+            stats = self.get_mixed_precision_stats(reset=False)
+            
+            metrics = {}
+            for key, value in stats.items():
+                metrics[f"{prefix}/{key}"] = value
+                
+            if step is not None:
+                wandb.log(metrics, step=step)
+            else:
+                wandb.log(metrics)
     
     def eval_one_batch(self,
                        sample: dict,
