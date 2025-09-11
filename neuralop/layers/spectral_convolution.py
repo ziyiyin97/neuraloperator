@@ -373,6 +373,84 @@ class SpectralConv(BaseSpectralConv):
         else:
             return resample(x, 1.0, list(range(2, x.ndim)), output_shape=out_shape)
     
+    def _apply_bloch_phase_rotation(self, x: torch.Tensor, bloch_angle: Union[float, List[float]], forward: bool = True) -> torch.Tensor:
+        """Apply Bloch phase rotation exp(±i * alpha * coordinate) to the spatial signal.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Spatial signal with shape (batch_size, channels, *spatial_sizes)
+        bloch_angle : Union[float, List[float]]
+            Bloch angles for each spatial dimension
+        forward : bool
+            If True, apply exp(+i * alpha * x) (forward rotation)
+            If False, apply exp(-i * alpha * x) (inverse rotation)
+            
+        Returns
+        -------
+        torch.Tensor
+            Spatial signal with Bloch phase rotation applied
+        """
+        # Convert single angle to list
+        if isinstance(bloch_angle, (int, float)):
+            bloch_angles = [bloch_angle] * self.order
+        else:
+            bloch_angles = list(bloch_angle)
+            
+        # Ensure we have the right number of angles
+        if len(bloch_angles) != self.order:
+            raise ValueError(f"Expected {self.order} Bloch angles, got {len(bloch_angles)}")
+        
+        # Check if any angle is non-zero
+        if all(angle == 0 for angle in bloch_angles):
+            return x
+            
+        # Generate coordinate grids normalized from 0 to 1 for all dimensions at once
+        spatial_sizes = x.shape[2:]
+        
+        # Create coordinate grids using meshgrid - much more efficient
+        coord_grids = torch.meshgrid([
+            torch.linspace(0.0, 1.0, size, device=x.device, dtype=torch.float32) 
+            for size in spatial_sizes
+        ], indexing='ij')
+        
+        # Calculate total phase by fully vectorized operations - no loops!
+        # Stack coordinate grids and angles for vectorized computation
+        coord_stack = torch.stack(coord_grids, dim=0)  # shape: (n_dims, *spatial_sizes)
+        angle_tensor = torch.tensor(bloch_angles, device=x.device, dtype=torch.float32)  # shape: (n_dims,)
+        
+        # Apply forward or inverse rotation
+        if not forward:
+            angle_tensor = -angle_tensor
+        
+        # Reshape angles for broadcasting: (n_dims, 1, 1, ..., 1)
+        angle_shape = [len(bloch_angles)] + [1] * self.order
+        angle_tensor = angle_tensor.view(angle_shape)
+        
+        # Compute phase for all dimensions at once: sum over dimension axis
+        total_phase = torch.sum(1j * angle_tensor * coord_stack, dim=0)
+        
+        # Apply phase rotation: exp(i * total_phase) * x
+        if torch.any(total_phase != 0):
+            # Expand phase to match x dimensions (add batch and channel dims)
+            phase_factor = torch.exp(total_phase).unsqueeze(0).unsqueeze(0)  # Add batch, channel dims
+            
+            # Handle complex vs real data differently
+            if self.complex_data:
+                # For complex data, keep the result complex
+                if not x.dtype.is_complex:
+                    x = x.to(dtype=torch.complex64 if x.dtype == torch.float32 else torch.complex128)
+                x = x * phase_factor
+            else:
+                # For real data, apply rotation but keep only real part
+                if not x.dtype.is_complex:
+                    x = x.to(dtype=torch.complex64 if x.dtype == torch.float32 else torch.complex128)
+                x = x * phase_factor
+                # Extract real part for real data
+                x = torch.real(x)
+                
+        return x
+    
     @property
     def n_modes(self):
         return self._n_modes
@@ -391,7 +469,8 @@ class SpectralConv(BaseSpectralConv):
         self._n_modes = n_modes
 
     def forward(
-        self, x: torch.Tensor, output_shape: Optional[Tuple[int]] = None
+        self, x: torch.Tensor, output_shape: Optional[Tuple[int]] = None, 
+        bloch_angle: Optional[Union[float, List[float]]] = 0,
     ):
         """Generic forward pass for the Factorized Spectral Conv
 
@@ -414,7 +493,12 @@ class SpectralConv(BaseSpectralConv):
         if self.fno_block_precision == "half":
             x = x.half()
 
+        # Apply Bloch phase rotation if specified (before FFT)
+        if bloch_angle is not None and bloch_angle != 0:
+            x = self._apply_bloch_phase_rotation(x, bloch_angle, forward=True)
+
         if self.complex_data:
+            
             x = torch.fft.fftn(x, norm=self.fft_norm, dim=fft_dims)
             dims_to_fft_shift = fft_dims
         else: 
@@ -498,6 +582,10 @@ class SpectralConv(BaseSpectralConv):
             x = torch.fft.ifftn(out_fft, s=mode_sizes, dim=fft_dims, norm=self.fft_norm)
         else:
             x = torch.fft.irfftn(out_fft, s=mode_sizes, dim=fft_dims, norm=self.fft_norm)
+
+        # Apply inverse Bloch phase rotation if specified (after inverse FFT)
+        if bloch_angle is not None and bloch_angle != 0:
+            x = self._apply_bloch_phase_rotation(x, bloch_angle, forward=False)
 
         if self.bias is not None:
             x = x + self.bias

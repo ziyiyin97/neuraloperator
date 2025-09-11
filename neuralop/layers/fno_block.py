@@ -299,13 +299,13 @@ class FNOBlocks(nn.Module):
             for norm, embedding in zip(self.norm, embeddings):
                 norm.set_embedding(embedding)
 
-    def forward(self, x, index=0, output_shape=None):
+    def forward(self, x, index=0, output_shape=None, bloch_angle=None):
         if self.preactivation:
-            return self.forward_with_preactivation(x, index, output_shape)
+            return self.forward_with_preactivation(x, index, output_shape, bloch_angle=bloch_angle)
         else:
-            return self.forward_with_postactivation(x, index, output_shape)
+            return self.forward_with_postactivation(x, index, output_shape, bloch_angle=bloch_angle)
 
-    def forward_with_postactivation(self, x, index=0, output_shape=None):
+    def forward_with_postactivation(self, x, index=0, output_shape=None, bloch_angle=None):
         x_skip_fno = self.fno_skips[index](x)
         x_skip_fno = self.convs[index].transform(x_skip_fno, output_shape=output_shape)
 
@@ -318,7 +318,7 @@ class FNOBlocks(nn.Module):
             else:
                 x = torch.tanh(x)
 
-        x_fno = self.convs[index](x, output_shape=output_shape)
+        x_fno = self.convs[index](x, output_shape=output_shape, bloch_angle=bloch_angle)
         #self.convs(x, index, output_shape=output_shape)
 
         if self.norm is not None:
@@ -345,7 +345,7 @@ class FNOBlocks(nn.Module):
 
         return x
 
-    def forward_with_preactivation(self, x, index=0, output_shape=None):
+    def forward_with_preactivation(self, x, index=0, output_shape=None, bloch_angle=None):
         # Apply non-linear activation (and norm)
         # before this block's convolution/forward pass:
         x = self.non_linearity(x)
@@ -365,7 +365,7 @@ class FNOBlocks(nn.Module):
             else:
                 x = torch.tanh(x)
 
-        x_fno = self.convs[index](x, output_shape=output_shape)
+        x_fno = self.convs[index](x, output_shape=output_shape, bloch_angle=bloch_angle)
 
         x = x_fno + x_skip_fno
 
