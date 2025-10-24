@@ -3,6 +3,7 @@ from typing import List, Optional, Union
 import torch
 from torch import nn
 import torch.nn.functional as F
+import math
 
 from .channel_mlp import ChannelMLP
 from .complex import CGELU, apply_complex, ctanh, ComplexValued
@@ -324,7 +325,7 @@ class FNOBlocks(nn.Module):
         if self.norm is not None:
             x_fno = self.norm[self.n_norms * index](x_fno)
 
-        x = x_fno + x_skip_fno
+        x = (1.0 / math.sqrt(self.n_layers)) * x_fno + x_skip_fno
 
         x = self.extra_convs[index](x) if self.post_fno_conv else x
 
@@ -367,7 +368,7 @@ class FNOBlocks(nn.Module):
 
         x_fno = self.convs[index](x, output_shape=output_shape)
 
-        x = x_fno + x_skip_fno
+        x = (1.0 / math.sqrt(self.n_layers)) * x_fno + x_skip_fno
 
         x = self.extra_convs[index](x) if self.post_fno_conv else x
 
