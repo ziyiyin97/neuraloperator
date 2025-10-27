@@ -1,4 +1,4 @@
-__version__ = '2.0.2'
+__version__ = '2.0.3'
 
 from .models import TFNO3d, TFNO2d, TFNO1d, TFNO
 from .models import get_model
